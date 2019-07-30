@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: test-ecs-app
+Parameters:
+  SubnetId:
+    Type: String
+    Default: subnet-ec00f1a4
+Resources:
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for ECS."
+  EcsSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EcsSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: '80'
+      ToPort: '80'
+      CidrIp: 0.0.0.0/0
+  EcsSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt EcsSecurityGroup.GroupId
+      IpProtocol: "-1"
+      CidrIp: 0.0.0.0/0
+  IamEcsTaskExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Effect: Allow
+      MaxSessionDuration: 3600
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  IamEcsAppAutoscalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs.application-autoscaling.amazonaws.com
+      MaxSessionDuration: 3600
+      Path: "/"
+  TestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      DelaySeconds: '0'
+      MaximumMessageSize: '262144'
+      MessageRetentionPeriod: '345600'
+      ReceiveMessageWaitTimeSeconds: '0'
+      VisibilityTimeout: '30'
+  TestAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Period: '300'
+      Statistic: Average
+      Threshold: '0.0'
+      AlarmActions:
+      - !Ref TestAppAutoscalingScalingPolicy
+      Dimensions:
+      - Name: QueueName
+        Value: !GetAtt TestQueue.QueueName
+  # ECS
+  TestCluster:
+    Type: AWS::ECS::Cluster
+  TestService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref TestCluster
+      DesiredCount: 0
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !GetAtt EcsSecurityGroup.GroupId
+          Subnets:
+            - !Ref SubnetId
+      TaskDefinition: !Ref TestTaskDefinition
+  TestTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Memory: 512
+      Cpu: 256
+      ExecutionRoleArn: !GetAtt IamEcsTaskExecRole.Arn
+      Family: "test-task-definition"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        -
+          Name: test-container-definition
+          Command:
+            - "date"
+          Image: "busybox"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TestTaskLogsLogGroup
+              awslogs-region: ap-northeast-1
+              awslogs-stream-prefix: ecs
+  TestTaskLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/ecs/test-task-logs-loggroup"
+
+
+  # AutoScaling
+  TestAppAutoscalingScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 2
+      MinCapacity: 0
+      ResourceId:
+        !Join
+        - '/'
+        - - 'service'
+          - !Ref TestCluster
+          - !GetAtt TestService.Name
+      RoleARN: !GetAtt IamEcsAppAutoscalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  TestAppAutoscalingScalingPolicy:
+    Type : AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: 'ScalePolicy'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref TestAppAutoscalingScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ExactCapacity
+        Cooldown: 300
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: 0
+            MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 1
+          - ScalingAdjustment: 1
+            MetricIntervalLowerBound: 1
+            MetricIntervalUpperBound: 2
+          - ScalingAdjustment: 2
+            MetricIntervalLowerBound: 2
